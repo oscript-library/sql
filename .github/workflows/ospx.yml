@@ -1,54 +1,133 @@
-name: OSPX
-on: [push, pull_request]
+name: CI
+
+on:
+  push:
+    branches: [master, develop]
+    tags: ['v*']
+  pull_request:
+    branches: [master, develop]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  MAIN_PROJECT: oscript-sql
+  CONFIGURATION: Release
+  OS1_LINK: https://oscript.io/downloads/1_9_4/x64/OneScript-1.9.4-x64.zip
+  OS2_LINK: https://oscript.io/downloads/latest/OneScript-2.1.0-fdd-x64.zip
+
 jobs:
-    build:
-        runs-on: windows-latest
-        steps:
-            - uses: actions/checkout@v4
-              with:
-                fetch-depth: 0  # Shallow clones should be disabled for a better relevancy of analysis
-            - name: preinstall os2
-              shell: cmd
-              run: |
-                mkdir os2
-                cd os2
-                curl https://oscript.io/downloads/night-build/x64/fdd --output fdd.zip
-                7z x fdd.zip > NUL
-                c:\windows\system32\cmd.exe /C bin\oscript.bat -version
-                c:\windows\system32\cmd.exe /C bin\oscript.bat lib\opm\src\cmd\opm.os install opm
-                cd ..
-            - name: preinstall os1
-              shell: cmd
-              run: |
-                mkdir os1
-                cd os1
-                curl https://oscript.io/downloads/latest/zip --output latest.zip
-                7z x latest.zip > NUL
-                bin\oscript.exe -version
-                bin\oscript.exe lib\opm\src\cmd\opm.os install opm
-                cd ..
-            - name: build
-              run: dotnet publish --configuration Release
-            - name: pack-and-install
-              shell: cmd
-              run: |
-                cd oscript-sql\bin\Release\net6.0\publish
-                del ScriptEngine*.dll NewtonSoft*.dll DotNetZip*.dll OneScript*.dll *.pdb
-                cd ..\..\..\..\..
-                xcopy /E oscript-sql\bin\Release\net6.0\publish\* oslib\Components\dotnet\
-                cd oslib
-                c:\windows\system32\cmd.exe /C ..\os2\bin\oscript.bat ..\os2\lib\opm\src\cmd\opm.os build .
-                for %%X in (*.ospx) do (c:\windows\system32\cmd.exe /C ..\os2\bin\oscript.bat ..\os2\lib\opm\src\cmd\opm.os install -f %%X )
-                for %%X in (*.ospx) do (..\os1\bin\oscript.exe ..\os1\lib\opm\src\cmd\opm.os install -f %%X )
-                cd ..
-            - name: test os1
-              env:
-                OSLIB_LOADER_TRACE: 1
-              run: |
-                os1\bin\oscript.exe testcomponent.os
-            - name: test os2
-              env:
-                OSLIB_LOADER_TRACE: 1
-              run: |
-                c:\windows\system32\cmd.exe /C os2\bin\oscript.bat testcomponent.os
-                
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup UTF-8 locale
+        shell: pwsh
+        run: |
+          reg add "HKLM\Software\Microsoft\Command Processor" /v Autorun /t REG_SZ /d "chcp 65001>nul" /f
+          Set-WinSystemLocale -SystemLocale ru-RU -ErrorAction SilentlyContinue
+          chcp 65001
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Install OneScript 2.x
+        shell: cmd
+        run: |
+          mkdir os2
+          cd os2
+          curl -L -o fdd.zip %OS2_LINK%
+          7z x fdd.zip -y > NUL
+          call bin\oscript.bat -version
+          call bin\oscript.bat lib\opm\src\cmd\opm.os install opm
+          call bin\oscript.bat lib\opm\src\cmd\opm.os list
+          cd ..
+
+      - name: Install OneScript 1.x
+        shell: cmd
+        run: |
+          mkdir os1
+          cd os1
+          curl -L -o os1.zip %OS1_LINK%
+          7z x os1.zip -y > NUL
+          bin\oscript.exe -version
+          bin\oscript.exe lib\opm\src\cmd\opm.os install opm
+          bin\oscript.exe lib\opm\src\cmd\opm.os list
+          cd ..
+
+      - name: Download OneScriptDocumenter
+        shell: cmd
+        run: |
+          curl -L -o OneScriptDocumenter.zip https://github.com/dmpas/OneScriptDocumenter/releases/download/1.0.13/documenter.zip
+          7z x OneScriptDocumenter.zip -y > NUL
+
+      - name: Restore
+        run: dotnet restore oscript-sql.sln
+
+      - name: Build
+        run: |
+          dotnet build oscript-sql.sln -c ${{ env.CONFIGURATION }} --no-restore
+          dotnet publish --no-build --configuration  ${{ env.CONFIGURATION }} --no-restore
+
+      - name: Package
+        shell: cmd
+        run: |
+          set PUBLISH=%MAIN_PROJECT%\bin\%CONFIGURATION%\net8.0\publish
+          del %PUBLISH%\*.pdb
+
+          mkdir oslib\Components\dotnet
+
+          OneScriptDocumenter.exe json oslib\Components\dotnet\syntaxHelp.json %PUBLISH%\1script_sql.dll
+
+          del %PUBLISH%\ScriptEngine*.* %PUBLISH%\NewtonSoft*.* %PUBLISH%\DotNetZip*.*
+
+          xcopy %PUBLISH%\* oslib\Components\dotnet\ /Y /E
+          xcopy README.md oslib\ /Y
+
+          cd oslib
+          call ..\os2\bin\oscript.bat ..\os2\lib\opm\src\cmd\opm.os build .
+          cd ..
+
+      - name: Test (OneScript 2.x)
+        shell: cmd
+        run: |
+          cd oslib
+          for %%X in (*.ospx) do (call ..\os2\bin\oscript.bat ..\os2\lib\opm\src\cmd\opm.os install -f %%X)
+          cd ..
+          set OSLIB_LOADER_TRACE=1
+          call os2\bin\oscript.bat testcomponent.os
+
+      - name: Test (OneScript 1.x)
+        shell: cmd
+        run: |
+          cd oslib
+          for %%X in (*.ospx) do (..\os1\bin\oscript.exe ..\os1\lib\opm\src\cmd\opm.os install -f %%X)
+          cd ..
+          set OSLIB_LOADER_TRACE=1
+          os1\bin\oscript.exe testcomponent.os
+
+      - name: Upload ospx artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: sql
+          path: oslib/*.ospx
+          archive: false
+
+      - name: Upload components artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: components
+          path: oslib/Components/dotnet/*.dll
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: oslib/*.ospx
+          generate_release_notes: true
